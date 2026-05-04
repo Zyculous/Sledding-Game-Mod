@@ -13,6 +13,7 @@ and the game runs as if the mod were never there.
   - Player tab menu
   - Shutdown of game sometimes will freeze. It seems to do this less if you quit all of the other splitscreen instances before quitting the original.
   - Racing works but the racing scoreboard is wrong
+  - Player controls start to get really buggy with more than 2 players and sometimes one controller will move the camera on one player while making a different player move and jump with the same controller.
 
 ---
 
