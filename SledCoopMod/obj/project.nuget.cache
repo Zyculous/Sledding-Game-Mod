@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "wJVZexCT6MA=",
+  "dgSpecHash": "iGgnI8pexAY=",
   "success": true,
-  "projectFilePath": "/home/zander/Code Repos/Sledding Game Demo/SledCoopMod/SledCoopMod.csproj",
+  "projectFilePath": "/home/zander/Code Repos/Sledding Game Mod/SledCoopMod/SledCoopMod.csproj",
   "expectedPackageFiles": [
     "/home/zander/.nuget/packages/asmresolver/6.0.0-beta.5/asmresolver.6.0.0-beta.5.nupkg.sha512",
     "/home/zander/.nuget/packages/asmresolver.dotnet/6.0.0-beta.5/asmresolver.dotnet.6.0.0-beta.5.nupkg.sha512",

@@ -103,6 +103,35 @@ BEPINEX_MARKER = "BepInEx/core/BepInEx.Core.dll"
 # Log file written by BepInEx on first run
 BEPINEX_LOG = "BepInEx/LogOutput.log"
 
+# BepInEx config file. We pre-seed this so the console log window is OFF by
+# default (it's noisy and pops up on top of the game). LogOutput.log is left
+# enabled so users can still gather diagnostics if something breaks.
+BEPINEX_CFG_PATH = "BepInEx/config/BepInEx.cfg"
+BEPINEX_CFG_DEFAULTS = """\
+## SledCoopMod installer pre-seeded BepInEx config.
+## BepInEx will fill in any other defaults on first launch — values you set
+## here are preserved across launches.
+
+[Logging.Console]
+
+## Enables showing a console for log output.
+# Setting type: Boolean
+# Default value: false (disabled by SledCoopMod installer)
+Enabled = false
+
+[Logging.Disk]
+
+## Enables writing log messages to disk.
+# Setting type: Boolean
+# Default value: true
+Enabled = true
+
+## Include unity log messages in log file output.
+# Setting type: Boolean
+# Default value: false
+WriteUnityLog = false
+"""
+
 # DLL search locations relative to this installer script
 MOD_DLL_CANDIDATES = [
     "{script_dir}/{dll}",
@@ -400,6 +429,52 @@ def get_bepinex_version(game: Path) -> str:
         except OSError:
             pass
     return ""
+
+
+def write_bepinex_console_disabled(game: Path) -> Tuple[bool, str]:
+    """
+    Pre-seed BepInEx/config/BepInEx.cfg so the console log window is disabled
+    by default. Returns (changed, message). If the file already exists with
+    Enabled = false in [Logging.Console], no change is made.
+
+    BepInEx merges configuration values across launches, so writing the file
+    before the first launch is the simplest way to enforce this default.
+    Users who want the console back can edit the file or delete it.
+    """
+    cfg_path = game / BEPINEX_CFG_PATH
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cfg_path.is_file():
+        try:
+            text = cfg_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+
+        # Already disabled — nothing to do.
+        m = re.search(
+            r"\[Logging\.Console\][^\[]*?^\s*Enabled\s*=\s*(\w+)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if m and m.group(1).strip().lower() == "false":
+            return False, "Console already disabled in BepInEx.cfg."
+
+        if m:
+            new_text = (
+                text[: m.start(1)] + "false" + text[m.end(1):]
+            )
+            cfg_path.write_text(new_text, encoding="utf-8")
+            return True, "Set [Logging.Console] Enabled = false in existing BepInEx.cfg."
+
+        # Section missing — append.
+        if not text.endswith("\n"):
+            text += "\n"
+        text += "\n[Logging.Console]\nEnabled = false\n"
+        cfg_path.write_text(text, encoding="utf-8")
+        return True, "Appended [Logging.Console] Enabled = false to existing BepInEx.cfg."
+
+    cfg_path.write_text(BEPINEX_CFG_DEFAULTS, encoding="utf-8")
+    return True, "Wrote BepInEx.cfg with the console log window disabled."
 
 
 def is_bepinex_outdated(version: str) -> bool:
@@ -752,6 +827,14 @@ class InstallerApp(tk.Tk):
                 zip_dest.unlink(missing_ok=True)
                 self._log("✓ BepInEx installed.")
                 self._progress(71, "BepInEx installed.")
+
+                # Disable the BepInEx console window by default. The log file
+                # at BepInEx/LogOutput.log stays enabled so diagnostics still work.
+                changed, message = write_bepinex_console_disabled(game)
+                if changed:
+                    self._log(f"  ✓ {message}")
+                else:
+                    self._log(f"  · {message}")
 
             # ── Step 2: Steam launch option ────────────────────────────────
             if do_launch:

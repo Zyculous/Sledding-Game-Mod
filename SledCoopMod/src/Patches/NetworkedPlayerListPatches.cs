@@ -430,9 +430,27 @@ namespace SledCoopMod.Patches
             try { row.name = $"SledCoop_PlayerList_{entry.ConnectionId}"; }
             catch { }
 
-            SetTextInChildByName(row, "textplayername", entry.Name);
+            // Make sure every layer of the row is active — the template can be
+            // cloned in a state where intermediate containers are disabled, which
+            // makes the row invisible even after we activate the root.
+            ActivateAncestorsUpTo(row);
+
+            // Clear ping FIRST so the broad "set anything name-shaped" sweep
+            // below doesn't accidentally overwrite the player name with "" if the
+            // ping field is named something like "PlayerNamePing".
             SetTextInChildByName(row, "textping", "");
-            SetAnyEmptyNameText(row, entry.Name);
+
+            // Try the strict, well-known name first; if the prefab is wrapped or
+            // renamed we fall back to fuzzier matches and finally to "first text
+            // component in the row" so the player always sees their name.
+            bool nameSet = SetTextInChildByName(row, "textplayername", entry.Name)
+                || SetTextInChildByNamePart(row, "playername", entry.Name)
+                || SetTextInChildByNamePart(row, "name", entry.Name, excludeContains: "ping");
+
+            if (!nameSet)
+                SetFirstTextInRow(row, entry.Name);
+            else
+                SetAnyEmptyNameText(row, entry.Name);
 
             SetChildActiveByName(row, "localplayerbackground", entry.IsLocal);
             SetChildActiveByName(row, "hostidentifier", entry.IsHost);
@@ -445,7 +463,30 @@ namespace SledCoopMod.Patches
             SetChildActiveByName(row, "psn", false);
             SetChildActiveByName(row, "switch", false);
 
+            // The profile buttons fire callbacks against Steam/EOS that don't
+            // exist in our loopback session and would crash — keep them visible
+            // (so the row reads like a button) but non-interactable.
             DisableProfileButtons(row);
+        }
+
+        private static void ActivateAncestorsUpTo(GameObject row)
+        {
+            try
+            {
+                Transform? t = row.transform;
+                int safety = 0;
+                while (t != null && safety++ < 8)
+                {
+                    GameObject go = t.gameObject;
+                    if (!go.activeSelf)
+                    {
+                        try { go.SetActive(true); }
+                        catch { }
+                    }
+                    t = t.parent;
+                }
+            }
+            catch { }
         }
 
         private static void DisableProfileButtons(GameObject row)
@@ -474,13 +515,65 @@ namespace SledCoopMod.Patches
             catch { }
         }
 
-        private static void SetTextInChildByName(GameObject root, string normalizedName, string value)
+        private static bool SetTextInChildByName(GameObject root, string normalizedName, string value)
         {
             GameObject? child = FindChildByNormalizedName(root, normalizedName);
             if (child == null)
-                return;
+                return false;
 
-            SetTextOnGameObject(child, value);
+            return SetTextOnGameObject(child, value);
+        }
+
+        private static bool SetTextInChildByNamePart(
+            GameObject root,
+            string normalizedSubstring,
+            string value,
+            string? excludeContains = null)
+        {
+            try
+            {
+                foreach (var transform in EnumerateTransforms(root.transform))
+                {
+                    if (transform == null)
+                        continue;
+
+                    string name = NormalizeName(transform.gameObject.name);
+                    if (name.IndexOf(normalizedSubstring, StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+
+                    if (!string.IsNullOrEmpty(excludeContains)
+                        && name.IndexOf(excludeContains, StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    if (SetTextOnGameObject(transform.gameObject, value))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool SetFirstTextInRow(GameObject root, string value)
+        {
+            try
+            {
+                foreach (var transform in EnumerateTransforms(root.transform))
+                {
+                    if (transform == null)
+                        continue;
+
+                    string name = NormalizeName(transform.gameObject.name);
+                    if (name.IndexOf("ping", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    if (SetTextOnGameObject(transform.gameObject, value))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private static void SetAnyEmptyNameText(GameObject row, string value)

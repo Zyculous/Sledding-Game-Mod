@@ -15,10 +15,12 @@ namespace SledCoopMod
         private static bool _startupClearLogged;
         private static bool _orphanedStartupClearLogged;
         private static bool _mainMenuReturnLogged;
+        private static bool _mainMenuBootOpenLogged;
         private static bool _pauseSelectLogged;
         private static bool _hudIndicatorNormalizeLogged;
         private static int _lastHudIndicatorNormalizeFrame;
         private static int _forceStartupCleanupUntilFrame;
+        private static int _lastBootMainMenuAttemptFrame;
         private static readonly System.Collections.Generic.HashSet<string> _clearedUiDiagnostics =
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         private static readonly System.Collections.Generic.HashSet<string> _hudPromptDiagnostics =
@@ -75,16 +77,18 @@ namespace SledCoopMod
             if (!NetworkedInstanceManager.IsNetworkedModeConfigured)
                 return;
 
-            bool shouldClean = SceneWatcher.IsInGameplayScene
-                || NetworkedInstanceManager.ShouldHideNetworkedOverlay
-                || Time.frameCount < _forceStartupCleanupUntilFrame;
-            if (!shouldClean)
-                return;
-
             if (Time.frameCount - _lastLoadingClearFrame < 30)
                 return;
 
             _lastLoadingClearFrame = Time.frameCount;
+
+            // The mod skips the EOSAuthenticator boot flow, so the game's loading
+            // panel and stray "LOADING" text never get cleared by the normal boot
+            // path. Always nuke them — at boot we additionally force the main
+            // menu open so the player can actually see something interactable.
+            bool inGameplay = SceneWatcher.IsInGameplayScene
+                || NetworkedInstanceManager.ShouldHideNetworkedOverlay
+                || Time.frameCount < _forceStartupCleanupUntilFrame;
 
             object? ui = GetUiReferenceController();
             if (ui == null)
@@ -111,11 +115,109 @@ namespace SledCoopMod
                 if (!_loadingClearLogged)
                 {
                     _loadingClearLogged = true;
-                    Plugin.Log.LogInfo("[NetworkedUiState] Cleared stuck native loading panel after networked gameplay started.");
+                    Plugin.Log.LogInfo("[NetworkedUiState] Cleared stuck native loading panel.");
                 }
             }
 
-            ClearStartupAndLoadingObjects(ui);
+            // Always strip orphaned LOADING text/objects, even on the boot scene.
+            ClearOrphanedStartupUiObjects();
+            ClearAllRuntimeStartupUiObjects();
+
+            if (inGameplay)
+            {
+                ClearStartupAndLoadingObjects(ui);
+            }
+            else
+            {
+                EnsureMainMenuOpenAtBoot(ui);
+            }
+        }
+
+        private static void EnsureMainMenuOpenAtBoot(object ui)
+        {
+            // Only retry once per second so we don't fight the game's own UI events.
+            if (Time.frameCount - _lastBootMainMenuAttemptFrame < 60)
+                return;
+            _lastBootMainMenuAttemptFrame = Time.frameCount;
+
+            // If a meaningful menu (main menu, lobby flow, settings) is already
+            // active, don't touch anything — the player has navigated somewhere.
+            foreach (string fieldName in new[]
+            {
+                "mainMenu",
+                "createLobby",
+                "lobbyExplorer",
+                "lobbiesViewer",
+                "lobbySettingsMenu",
+                "hostLobbyConfirmInternetMenu",
+                "passwordEnterMenu",
+                "passwordPopup",
+                "settingsMenu",
+                "quitAreYouSureMenu",
+                "showPlayersMenu",
+                "statsPanel",
+                "pauseMenu",
+            })
+            {
+                if (IsMenuPanelActive(ui, fieldName))
+                {
+                    if (string.Equals(fieldName, "mainMenu", StringComparison.Ordinal) && !_mainMenuBootOpenLogged)
+                    {
+                        _mainMenuBootOpenLogged = true;
+                        Plugin.Log.LogInfo("[NetworkedUiState] Native main menu already active after boot; nothing to force.");
+                    }
+                    return;
+                }
+            }
+
+            bool opened = false;
+
+            try
+            {
+                object? mainMenu = GetFieldValue(ui, "mainMenu");
+                if (mainMenu != null)
+                {
+                    var openMenu = ui.GetType().GetMethod(
+                        "OpenMenu",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (openMenu != null)
+                    {
+                        openMenu.Invoke(ui, new[] { mainMenu });
+                        opened = true;
+                    }
+                }
+            }
+            catch { }
+
+            if (!opened)
+            {
+                GameObject? mainMenuPanel = GetMenuPanel(ui, "mainMenu");
+                if (mainMenuPanel != null)
+                {
+                    try
+                    {
+                        mainMenuPanel.SetActive(true);
+                        opened = true;
+                    }
+                    catch { }
+                }
+            }
+
+            if (opened)
+            {
+                try
+                {
+                    Cursor.lockState = CursorLockMode.None;
+                    Cursor.visible = true;
+                }
+                catch { }
+
+                if (!_mainMenuBootOpenLogged)
+                {
+                    _mainMenuBootOpenLogged = true;
+                    Plugin.Log.LogInfo("[NetworkedUiState] Forced native main menu open after EOS-skip boot.");
+                }
+            }
         }
 
         public static void ForceStartupUiCleanup(string reason)
@@ -126,7 +228,12 @@ namespace SledCoopMod
             if (!SceneWatcher.IsInGameplayScene && !NetworkedInstanceManager.ShouldHideNetworkedOverlay)
                 return;
 
-            _forceStartupCleanupUntilFrame = Math.Max(_forceStartupCleanupUntilFrame, Time.frameCount + 900);
+            // Extend the force-cleanup window to ~30 s at 60 fps. Belt-and-braces
+            // alongside the source-level prefix patches in
+            // NetworkedLoadingTextPatches.cs and NetworkedLobbyExplorerPatches.cs:
+            // those stop new writes, this nukes anything that landed before the
+            // patches engaged.
+            _forceStartupCleanupUntilFrame = Math.Max(_forceStartupCleanupUntilFrame, Time.frameCount + 1800);
 
             try
             {

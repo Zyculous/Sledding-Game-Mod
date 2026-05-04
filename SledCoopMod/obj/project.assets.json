@@ -4711,14 +4711,14 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/home/zander/Code Repos/Sledding Game Demo/SledCoopMod/SledCoopMod.csproj",
+      "projectUniqueName": "/home/zander/Code Repos/Sledding Game Mod/SledCoopMod/SledCoopMod.csproj",
       "projectName": "SledCoopMod",
-      "projectPath": "/home/zander/Code Repos/Sledding Game Demo/SledCoopMod/SledCoopMod.csproj",
+      "projectPath": "/home/zander/Code Repos/Sledding Game Mod/SledCoopMod/SledCoopMod.csproj",
       "packagesPath": "/home/zander/.nuget/packages/",
-      "outputPath": "/home/zander/Code Repos/Sledding Game Demo/SledCoopMod/obj/",
+      "outputPath": "/home/zander/Code Repos/Sledding Game Mod/SledCoopMod/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
-        "/home/zander/Code Repos/Sledding Game Demo/SledCoopMod/nuget.config",
+        "/home/zander/Code Repos/Sledding Game Mod/SledCoopMod/nuget.config",
         "/home/zander/.nuget/NuGet/NuGet.Config"
       ],
       "originalTargetFrameworks": [
