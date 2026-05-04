@@ -6,13 +6,13 @@ The mod is designed to coexist with the unmodified game: when it's installed
 but you want to play vanilla, flip a single config flag (or remove the DLL)
 and the game runs as if the mod were never there.
 
-This mod is functional but no where close to bug free. Here are some notable bugs:
-  -Guest data doesnt load in and always copies the player 1
-  -Leftover UI text on screen that needs removed (trust me I tried)
-  -In game mod config menu (working on it)
-  -Player tab menu
-  -Shutdown of game sometimes will freeze. It seems to do this less if you quit all of the other splitscreen instances before quitting the original.
-  -Racing works but the racing scoreboard is wrong
+**This mod is functional but no where close to bug free. Here are some notable bugs:**
+  - Guest data doesnt load in and always copies the player 1
+  - Leftover UI text on screen that needs removed (trust me I tried)
+  - In game mod config menu (working on it)
+  - Player tab menu
+  - Shutdown of game sometimes will freeze. It seems to do this less if you quit all of the other splitscreen instances before quitting the original.
+  - Racing works but the racing scoreboard is wrong
 
 ---
 
