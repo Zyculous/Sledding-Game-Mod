@@ -144,6 +144,8 @@ namespace SledCoopMod
             return null;
         }
 
+        internal static GameObject[]? GetSceneRootGameObjectsExposed(Scene scene) => GetSceneRootGameObjects(scene);
+
         private static GameObject[]? GetSceneRootGameObjects(Scene scene)
         {
             var methods = scene.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);

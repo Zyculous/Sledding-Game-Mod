@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using SledCoopMod.Patches;
 
@@ -14,6 +16,15 @@ namespace SledCoopMod
         private static bool _loadingClearLogged;
         private static bool _startupClearLogged;
         private static bool _orphanedStartupClearLogged;
+        private static bool _preGameCanvasDeactivateLogged;
+        private static bool _adminCloseLoadingInvokedLogged;
+        private static int _lastResidualSweepDiagFrame;
+        private static int _residualHolderHits;
+        private static int _preGameCanvasHits;
+        private static bool _residualSweepErrorLogged;
+        private static bool _preGameSweepErrorLogged;
+        private static bool _residualSweepEnteredLogged;
+        private static bool _residualFallbackErrorLogged;
         private static bool _mainMenuReturnLogged;
         private static bool _mainMenuBootOpenLogged;
         private static bool _pauseSelectLogged;
@@ -50,12 +61,46 @@ namespace SledCoopMod
             }
             catch { }
 
-            return IsMenuPanelActive(ui, "pauseMenu")
-                || IsMenuPanelActive(ui, "settingsMenu")
-                || IsMenuPanelActive(ui, "quitAreYouSureMenu")
-                || IsMenuPanelActive(ui, "showPlayersMenu")
-                || IsMenuPanelActive(ui, "statsPanel");
+            foreach (string field in s_modalMenuFields)
+            {
+                if (IsMenuPanelActive(ui, field))
+                    return true;
+            }
+            return false;
         }
+
+        // Modal menu fields. When any of these is `activeInHierarchy` we treat
+        // the game as "in a menu": Patch_PlayerHoldingController_HostGamepadBleed
+        // suppresses snowball/throw/punch/place commands, the cursor is unlocked,
+        // and SelectActiveMenuDefault seeds the EventSystem.
+        //
+        // CAUTION: do NOT add the in-HUD "Panel" entries here (racingPanel,
+        // settingsPanel, mapPanel, trinketEditingPanel, trinketListPanel). Those
+        // sit inside the In-Game canvas and are `activeInHierarchy = true`
+        // during ordinary gameplay — adding them caused every Cmd_StartPickingUpSnow
+        // / Cmd_StartChargeThrow to be prefix-suppressed on the child instance
+        // and broke pickup / throw entirely. The actual inventory wheel and
+        // interaction popups (actionsMenu / interactionMenus) are gated by
+        // `panel.activeInHierarchy` properly, so they're safe.
+        private static readonly string[] s_modalMenuFields =
+        {
+            "pauseMenu",
+            "settingsMenu",
+            "quitAreYouSureMenu",
+            "resetAllSettingsAreYouSure",
+            "showPlayersMenu",
+            "statsPanel",
+            "actionsMenu",
+            "interactionMenus",
+            "controlMapperMenu",
+            "creditsMenu",
+            "blockedPlayersMenu",
+            "reportPlayerMenu",
+            "reportPlayer",
+            "trinketSellAreYouSureMenu",
+            "passwordEnterMenu",
+            "passwordPopup",
+        };
 
         public static void ApplyMenuCursorState()
         {
@@ -69,7 +114,570 @@ namespace SledCoopMod
             }
             catch { }
 
-            SelectPauseMenuDefault();
+            SelectActiveMenuDefault();
+        }
+
+        // Re-asserts Cursor.lockState=Locked while the host is in gameplay
+        // and no native menu / mod modal is open. Without this, the host's
+        // mouse can escape the gameplay window because (a) the in-process
+        // ApplyMenuCursorState path or (b) some game-side menu transition
+        // left lockState at None and nothing flipped it back. Gated by
+        // ModConfig.ForceCursorLockInGameplay so users who prefer the
+        // unlocked cursor can opt out via the in-game settings UI.
+        public static void EnforceGameplayCursorLockIfNeeded()
+        {
+            if (!ModConfig.ForceCursorLockInGameplay.Value)
+                return;
+            if (!NetworkedInstanceManager.IsNetworkedModeConfigured)
+                return;
+            if (!SceneWatcher.IsInGameplayScene)
+                return;
+
+            // Don't fight any open menu/modal — the menu is allowed to
+            // unlock the cursor while it's visible.
+            if (IsNativeMenuOpen())
+                return;
+            if (ModSettingsUi.IsAnyOpen)
+                return;
+
+            try
+            {
+                if (Cursor.lockState != CursorLockMode.Locked)
+                {
+                    Cursor.lockState = CursorLockMode.Locked;
+                    Cursor.visible = false;
+                }
+                else if (Cursor.visible)
+                {
+                    Cursor.visible = false;
+                }
+            }
+            catch { }
+        }
+
+        // Per-frame text-component sweep. Cheaper than the full UI walk in
+        // ClearStuckLoadingIfNeeded — just iterates TMP_Text/Text/Graphic
+        // components and clears any whose visible text matches the
+        // LOADING / "TEXT CHAT ONLY LOBBIES" patterns. Runs every frame
+        // during gameplay (and for a couple of seconds before/after) so
+        // text that's re-stamped by a localisation event or a game-side
+        // Update can't survive longer than one frame.
+        public static void RunFastLoadingTextSweep()
+        {
+            if (!NetworkedInstanceManager.IsNetworkedModeConfigured)
+                return;
+
+            // The two residual lobby holders ("Loading", "text chat only
+            // indicator (on / off)") must die in the main menu *and* during
+            // gameplay — run that pass before the gameplay-only gate below.
+            try { DeactivateResidualLobbyHolders(); }
+            catch (Exception e)
+            {
+                if (!_residualSweepErrorLogged)
+                {
+                    _residualSweepErrorLogged = true;
+                    Plugin.Log.LogWarning($"[NetworkedUiState] residual holder sweep threw: {e.GetType().FullName}: {e.Message}\n{e.StackTrace}");
+                }
+            }
+
+            // Likewise nuke the entire (Canvas) Pre-Game during gameplay; the
+            // helper itself decides whether the current scene qualifies.
+            try { DeactivatePreGameCanvasIfInGame(); }
+            catch (Exception e)
+            {
+                if (!_preGameSweepErrorLogged)
+                {
+                    _preGameSweepErrorLogged = true;
+                    Plugin.Log.LogWarning($"[NetworkedUiState] Pre-Game canvas sweep threw: {e.GetType().FullName}: {e.Message}\n{e.StackTrace}");
+                }
+            }
+
+            if (!SceneWatcher.IsInGameplayScene
+                && !NetworkedInstanceManager.ShouldHideNetworkedOverlay
+                && Time.frameCount > _forceStartupCleanupUntilFrame)
+                return;
+
+            try
+            {
+                int discarded = 0;
+                ClearStartupTextComponentsOfType(PatchHelpers.SafeTypeByName("TMPro.TMP_Text"), ref discarded, includeInactive: true);
+                ClearStartupTextComponentsOfType(typeof(Text), ref discarded, includeInactive: true);
+            }
+            catch { }
+        }
+
+        // Pre-Game is the lobby/loading canvas (parents UI_Lobbies, the loading
+        // panel, etc). Once gameplay has actually started we want the entire
+        // canvas dead so its children (Loading text, "TEXT CHAT ONLY LOBBIES"
+        // indicator, etc.) cannot keep rendering. Runs every frame so any
+        // game-side code that re-enables the canvas is reverted immediately.
+        private static void DeactivatePreGameCanvasIfInGame()
+        {
+            if (!SceneWatcher.IsInGameplayScene && !NetworkedInstanceManager.ShouldHideNetworkedOverlay)
+                return;
+
+            int matched = 0;
+            int deactivated = 0;
+
+            // Direct find of the canvas root — same bullet-proof primitive
+            // we use for the residual holder paths. Tries the literal name
+            // shown in the game_dumps first, then a couple of common
+            // spellings as fallback.
+            string[] candidates = { "(Canvas) Pre-Game", "Pre-Game", "(Canvas) Pre-Game " };
+            foreach (string name in candidates)
+            {
+                GameObject? go = null;
+                try { go = GameObject.Find(name); }
+                catch { continue; }
+                if (go == null) continue;
+
+                matched++;
+                if (IsSledCoopObject(go)) continue;
+                if (!go.activeSelf) continue;
+
+                try
+                {
+                    go.SetActive(false);
+                    deactivated++;
+                    Plugin.Log.LogInfo($"[NetworkedUiState] Deactivated Pre-Game canvas '{name}' during gameplay.");
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[NetworkedUiState] SetActive(false) on canvas '{name}' threw: {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            _preGameCanvasHits = matched;
+            if (matched == 0 && !_preGameCanvasDeactivateLogged && Time.frameCount % 600 == 0)
+            {
+                Plugin.Log.LogInfo("[NetworkedUiState] Pre-Game canvas sweep: no matching canvas found this frame.");
+            }
+            else if (deactivated > 0)
+            {
+                _preGameCanvasDeactivateLogged = true;
+            }
+        }
+
+        // Invokes the Admin Panel's "Close Loading" button onClick (the same
+        // action the player would trigger by pressing the button in the admin
+        // canvas). Preferred over UiReferenceController.DisableLoading because
+        // it goes through the game's actual loading-screen close path.
+        private static bool InvokeAdminCloseLoadingButton()
+        {
+            try
+            {
+                foreach (var obj in FindUnityObjectsOfTypeAll(typeof(Button)))
+                {
+                    var button = obj as Button;
+                    if (button == null) continue;
+
+                    GameObject go = button.gameObject;
+                    if (go == null || IsSledCoopObject(go)) continue;
+
+                    string name = go.name ?? "";
+                    if (!name.Equals("Button_CloseLoading", StringComparison.OrdinalIgnoreCase)
+                        && !name.Equals("Close Loading Button", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    try { button.onClick?.Invoke(); }
+                    catch { continue; }
+
+                    if (!_adminCloseLoadingInvokedLogged)
+                    {
+                        _adminCloseLoadingInvokedLogged = true;
+                        Plugin.Log.LogInfo($"[NetworkedUiState] Invoked Admin Panel '{name}' onClick to close loading screen.");
+                    }
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // Targets the two residual lobby UI holders the catch-all sweeps miss
+        // because their text children are cleared but the holder GameObjects
+        // themselves keep rendering (sprite background or layout glyph):
+        //   (Canvas) Pre-Game/UI_Lobbies/Panel/layoutgroup/List/Loading
+        //   (Canvas) Pre-Game/UI_Lobbies/Panel/text chat only indicator (on / off)
+        // Absolute hierarchy paths from the game_dumps. GameObject.Find(string)
+        // navigates from any active root and works under IL2CPP (no wrapper
+        // signature trouble). We use both the Pre-Game-prefixed path (exact)
+        // and a name-only fallback in case the parent canvas is renamed.
+        private static readonly string[] _residualHolderPaths =
+        {
+            "(Canvas) Pre-Game/UI_Lobbies/Panel/layoutgroup/List/Loading",
+            "(Canvas) Pre-Game/UI_Lobbies/Panel/text chat only indicator (on / off)",
+        };
+
+        private static void DeactivateResidualLobbyHolders()
+        {
+            if (!_residualSweepEnteredLogged)
+            {
+                _residualSweepEnteredLogged = true;
+                Plugin.Log.LogInfo($"[NetworkedUiState] residual sweep: first invocation reached (frame={Time.frameCount}).");
+            }
+
+            int seen = 0;
+            int deactivated = 0;
+            int totalVisited = _residualHolderPaths.Length;
+
+            // Path lookup first (cheap), then content-based scan as the
+            // primary mechanism: enumerate every active TMP_Text / Text in
+            // the scene and deactivate any holder whose text matches the
+            // residual lobby strings. The host's (Canvas) Pre-Game is
+            // already deactivated by the canvas sweep but the strings
+            // sometimes live in *other* canvases — content matching catches
+            // them regardless of where they are.
+            foreach (string path in _residualHolderPaths)
+            {
+                GameObject? go = null;
+                try { go = GameObject.Find(path); }
+                catch { continue; }
+
+                if (go == null || IsSledCoopObject(go) || !go.activeSelf) continue;
+
+                seen++;
+                try
+                {
+                    Plugin.Log.LogInfo($"[NetworkedUiState] Deactivating residual lobby holder via path '{path}'.");
+                    LogClearedUiObject(go, GetAnyText(go));
+                    go.SetActive(false);
+                    deactivated++;
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[NetworkedUiState] SetActive(false) on '{path}' threw: {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            // Content-based scan: catches text wherever it lives.
+            int contentHits = ScanActiveTextForResidual(typeof(Text));
+            var tmp = PatchHelpers.SafeTypeByName("TMPro.TMP_Text");
+            if (tmp != null) contentHits += ScanActiveTextForResidual(tmp);
+            var tmpUgui = PatchHelpers.SafeTypeByName("TMPro.TextMeshProUGUI");
+            if (tmpUgui != null) contentHits += ScanActiveTextForResidual(tmpUgui);
+            var tmp3d = PatchHelpers.SafeTypeByName("TMPro.TextMeshPro");
+            if (tmp3d != null) contentHits += ScanActiveTextForResidual(tmp3d);
+            seen += contentHits;
+            deactivated += contentHits;
+
+            // Name-based canvas-tree walk: independent of what component
+            // renders the visible string. Iterates every active Canvas and
+            // walks its transform hierarchy looking for descendants named
+            // "Loading" or the text-chat-indicator. Catches the case where
+            // the string is rendered by an Image / sprite / TextMesh / etc.
+            int nameHits = WalkActiveCanvasesForResidualNames();
+            seen += nameHits;
+            deactivated += nameHits;
+
+            _residualHolderHits = seen;
+
+            if (Time.frameCount - _lastResidualSweepDiagFrame > 300)
+            {
+                _lastResidualSweepDiagFrame = Time.frameCount;
+                Plugin.Log.LogInfo($"[NetworkedUiState] residual sweep: paths={totalVisited} found={seen} deactivated={deactivated}.");
+            }
+        }
+
+        // Iterates every *active* component of the given Text/TMP_Text type
+        // (UnityEngine.Object.FindObjectsOfType, which has a working
+        // Il2CppInterop wrapper for System.Type — unlike FindObjectsOfTypeAll
+        // which throws MissingMethodException). For every component whose
+        // visible text contains "Loading" or "TEXT CHAT ONLY", walk a few
+        // ancestors looking for a holder GameObject named "Loading" or the
+        // text-chat-indicator and deactivate it. Returns the number of
+        // GameObjects deactivated.
+        private static int ScanActiveTextForResidual(Type componentType)
+        {
+            int killed = 0;
+            UnityEngine.Object[] objects;
+            try { objects = FindUnityObjectsOfType(componentType); }
+            catch { return 0; }
+
+            foreach (var obj in objects)
+            {
+                if (obj == null) continue;
+                string text;
+                try { text = GetTextProperty(obj) ?? ""; }
+                catch { continue; }
+                if (string.IsNullOrEmpty(text)) continue;
+
+                bool match = text.IndexOf("Loading", StringComparison.OrdinalIgnoreCase) >= 0
+                    || text.IndexOf("TEXT CHAT ONLY", StringComparison.OrdinalIgnoreCase) >= 0
+                    || text.IndexOf("text chat only", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!match) continue;
+
+                GameObject? go = null;
+                try { go = ReflectionHelper.GetGameObject(obj); }
+                catch { }
+                if (go == null || IsSledCoopObject(go)) continue;
+
+                // Walk up to 4 ancestors looking for a named holder. If we
+                // find one, kill it; otherwise kill the text GO itself.
+                Transform? holder = null;
+                Transform? t = go.transform;
+                for (int i = 0; i < 5 && t != null; i++)
+                {
+                    string n = t.gameObject.name ?? "";
+                    if (n.Equals("Loading", StringComparison.OrdinalIgnoreCase)
+                        || n.Equals("text chat only indicator (on / off)", StringComparison.OrdinalIgnoreCase))
+                    {
+                        holder = t;
+                        break;
+                    }
+                    t = t.parent;
+                }
+
+                GameObject target = holder != null ? holder.gameObject : go;
+                if (!target.activeSelf) continue;
+
+                try
+                {
+                    Plugin.Log.LogInfo($"[NetworkedUiState] Content-match deactivate: holder='{target.name}' text='{Truncate(text, 40)}'.");
+                    target.SetActive(false);
+                    killed++;
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[NetworkedUiState] SetActive(false) on '{target.name}' threw: {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            return killed;
+        }
+
+        private static string Truncate(string s, int max) =>
+            s.Length <= max ? s : s.Substring(0, max) + "…";
+
+        // Walks every active Canvas in the scene (FindObjectsOfType has a
+        // working IL2CPP wrapper for System.Type — confirmed by the HUD
+        // prompt normalization which uses the same primitive). For each
+        // canvas, recurses into its transform tree looking for descendants
+        // whose GameObject name matches the residual lobby holders. Kills
+        // them. Independent of what component actually draws the string.
+        private static int WalkActiveCanvasesForResidualNames()
+        {
+            int killed = 0;
+            UnityEngine.Object[] canvases;
+            try { canvases = FindUnityObjectsOfType(typeof(Canvas)); }
+            catch { return 0; }
+
+            foreach (var obj in canvases)
+            {
+                if (obj is not Canvas canvas || canvas == null) continue;
+
+                Transform? root = null;
+                try { root = canvas.transform; } catch { }
+                if (root == null) continue;
+
+                killed += WalkAndKillByName(root);
+            }
+            return killed;
+        }
+
+        private static int WalkAndKillByName(Transform? t)
+        {
+            if (t == null) return 0;
+
+            int killed = 0;
+            int childCount;
+            try { childCount = t.childCount; } catch { return 0; }
+
+            for (int i = 0; i < childCount; i++)
+            {
+                Transform? child;
+                try { child = t.GetChild(i); } catch { continue; }
+                if (child == null) continue;
+
+                GameObject? cgo = null;
+                try { cgo = child.gameObject; } catch { }
+                if (cgo == null) { killed += WalkAndKillByName(child); continue; }
+
+                string name = cgo.name ?? "";
+                bool match = name.Equals("Loading", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("text chat only indicator (on / off)", StringComparison.OrdinalIgnoreCase);
+
+                if (match && cgo.activeSelf && !IsSledCoopObject(cgo))
+                {
+                    try
+                    {
+                        Plugin.Log.LogInfo($"[NetworkedUiState] Canvas-walk deactivate: '{name}' (parent='{(child.parent != null ? child.parent.gameObject.name : "<root>")}').");
+                        cgo.SetActive(false);
+                        killed++;
+                        // Don't recurse into a deactivated subtree.
+                        continue;
+                    }
+                    catch (Exception e)
+                    {
+                        Plugin.Log.LogWarning($"[NetworkedUiState] SetActive(false) on '{name}' threw: {e.GetType().Name}: {e.Message}");
+                    }
+                }
+
+                killed += WalkAndKillByName(child);
+            }
+
+            return killed;
+        }
+
+        // Old transform-walk variant kept around for potential reuse but
+        // gated behind a flag — direct GameObject.Find above is the active
+        // primary path because it doesn't depend on Il2CppInterop wrappers.
+        private static void DeactivateResidualLobbyHolders_Unused()
+        {
+            int seen = 0;
+            int deactivated = 0;
+            int totalVisited = 0;
+
+            // RuntimeUnityEditor's ObjectTreeViewer enumerates every Transform
+            // via Resources.FindObjectsOfTypeAll<Transform>() to populate its
+            // hierarchy, which finds GameObjects in *every* loaded scene
+            // including DontDestroyOnLoad — and crucially returns inactive
+            // objects too. We use the same primitive: it works reliably under
+            // IL2CPP/Il2CppInterop where Scene.GetRootGameObjects() can return
+            // a wrapper array that some reflection paths choke on.
+            // RUE-style enumeration: the generic
+            // Resources.FindObjectsOfTypeAll<T>() overload works under
+            // IL2CPP/Il2CppInterop because Il2CppInterop binds the type
+            // parameter at compile time. The non-generic version has a
+            // signature mismatch (it takes Il2CppSystem.Type, not
+            // System.Type) so reflection / direct calls return empty.
+            Transform[] transforms;
+            try { transforms = Resources.FindObjectsOfTypeAll<Transform>(); }
+            catch (Exception e)
+            {
+                if (!_residualFallbackErrorLogged)
+                {
+                    _residualFallbackErrorLogged = true;
+                    Plugin.Log.LogWarning($"[NetworkedUiState] FindObjectsOfTypeAll<Transform> threw: {e.GetType().Name}: {e.Message}");
+                }
+                transforms = Array.Empty<Transform>();
+            }
+
+            foreach (var t in transforms)
+            {
+                if (t == null) continue;
+
+                GameObject? go = null;
+                try { go = t.gameObject; } catch { }
+                if (go == null) continue;
+
+                totalVisited++;
+                if (IsSledCoopObject(go)) continue;
+
+                string name = go.name ?? "";
+                bool match = name.Equals("Loading", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("text chat only indicator (on / off)", StringComparison.OrdinalIgnoreCase);
+                if (!match) continue;
+
+                seen++;
+                if (!go.activeSelf) continue;
+
+                try
+                {
+                    Plugin.Log.LogInfo($"[NetworkedUiState] Deactivating residual lobby holder '{name}' (parent='{(t.parent != null ? t.parent.gameObject.name : "<root>")}').");
+                    LogClearedUiObject(go, GetAnyText(go));
+                    go.SetActive(false);
+                    deactivated++;
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[NetworkedUiState] SetActive(false) on '{name}' threw: {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            _residualHolderHits = seen;
+
+            if (Time.frameCount - _lastResidualSweepDiagFrame > 300)
+            {
+                _lastResidualSweepDiagFrame = Time.frameCount;
+                Plugin.Log.LogInfo($"[NetworkedUiState] residual sweep: transforms={totalVisited} matched={seen} deactivated={deactivated}.");
+            }
+        }
+
+        // Iterates every GameObject in every loaded scene, including inactive
+        // ones. Calls SceneManager.GetSceneAt(i).GetRootGameObjects() directly
+        // (no reflection): under IL2CPP/Il2CppInterop the wrapper handles the
+        // Il2CppReferenceArray<GameObject> conversion automatically, the same
+        // way RuntimeUnityEditor walks the scene tree.
+        private static void ForEachSceneGameObject(Action<GameObject> action)
+        {
+            int sceneCount;
+            try { sceneCount = SceneManager.sceneCount; }
+            catch { return; }
+
+            for (int i = 0; i < sceneCount; i++)
+            {
+                Scene scene;
+                try { scene = SceneManager.GetSceneAt(i); }
+                catch { continue; }
+
+                if (!scene.IsValid() || !scene.isLoaded) continue;
+
+                GameObject[]? roots = null;
+                try { roots = scene.GetRootGameObjects(); }
+                catch
+                {
+                    // Fall back to the reflection-based helper if the direct
+                    // call is somehow rejected on this runtime.
+                    try { roots = NetworkManagerFinder.GetSceneRootGameObjectsExposed(scene); }
+                    catch { roots = null; }
+                }
+                if (roots == null) continue;
+
+                foreach (var root in roots)
+                {
+                    if (root == null) continue;
+                    WalkTransformAndInvoke(root.transform, action);
+                }
+            }
+        }
+
+        private static void WalkTransformAndInvoke(Transform? t, Action<GameObject> action)
+        {
+            if (t == null) return;
+
+            try
+            {
+                GameObject go = t.gameObject;
+                if (go != null)
+                {
+                    try { action(go); } catch { }
+                }
+            }
+            catch { }
+
+            int childCount;
+            try { childCount = t.childCount; }
+            catch { return; }
+
+            for (int i = 0; i < childCount; i++)
+            {
+                Transform? child;
+                try { child = t.GetChild(i); }
+                catch { continue; }
+                WalkTransformAndInvoke(child, action);
+            }
+        }
+
+        // True if any ancestor's name matches the lobby/pre-game hierarchy
+        // shown in the game_dumps (Panel → UI_Lobbies → (Canvas) Pre-Game).
+        // Substring match handles the "(Canvas) " prefix on the canvas root.
+        private static bool IsUnderUiLobbiesPanel(GameObject go)
+        {
+            try
+            {
+                Transform? t = go.transform.parent;
+                while (t != null)
+                {
+                    string n = t.gameObject.name ?? "";
+                    if (n.IndexOf("UI_Lobbies", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("Pre-Game", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                    t = t.parent;
+                }
+            }
+            catch { }
+            return false;
         }
 
         public static void ClearStuckLoadingIfNeeded()
@@ -98,8 +706,11 @@ namespace SledCoopMod
                 return;
             }
 
-            try { Call(ui, "DisableLoading"); }
-            catch { }
+            if (!InvokeAdminCloseLoadingButton())
+            {
+                try { Call(ui, "DisableLoading"); }
+                catch { }
+            }
 
             try
             {
@@ -299,8 +910,11 @@ namespace SledCoopMod
             object? ui = GetUiReferenceController();
             if (ui == null) return;
 
-            try { Call(ui, "DisableLoading"); }
-            catch { }
+            if (!InvokeAdminCloseLoadingButton())
+            {
+                try { Call(ui, "DisableLoading"); }
+                catch { }
+            }
 
             try
             {
@@ -485,6 +1099,7 @@ namespace SledCoopMod
                 }
                 catch { }
             }
+            
 
             if (changed && !_orphanedStartupClearLogged)
             {
@@ -1007,6 +1622,10 @@ namespace SledCoopMod
                 "lobbyExplorer",
                 "createLobby",
                 "hostLobbyConfirmInternetMenu",
+                "text chat only indicator (on / off)",
+                "UI_Lobbies",
+                "Pre-Game",
+                "Loading",
                 "loadingText",
                 "loadingThrobber",
                 "Loading Text",
@@ -1195,12 +1814,34 @@ namespace SledCoopMod
             return result;
         }
 
+        // IL2CPP-interop GameObject does not expose GetComponent(System.Type).
+        // It only has GetComponent<T>() and GetComponent(string). Route Unity
+        // types through the generic overload and game types through the string
+        // overload, otherwise the call throws MissingMethodException at the
+        // binder before any try/catch runs.
         private static object? GetComponentByType(GameObject? go, Type? type)
         {
             if (go == null || type == null)
                 return null;
 
-            try { return go.GetComponent(type); }
+            if (type == typeof(Text))       return SafeGetComponent<Text>(go);
+            if (type == typeof(Selectable)) return SafeGetComponent<Selectable>(go);
+            if (type == typeof(Graphic))    return SafeGetComponent<Graphic>(go);
+
+            return SafeGetComponentByTypeName(go, type.Name);
+        }
+
+        private static T? SafeGetComponent<T>(GameObject go) where T : Component
+        {
+            try { return go.GetComponent<T>(); }
+            catch { return null; }
+        }
+
+        private static object? SafeGetComponentByTypeName(GameObject go, string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName))
+                return null;
+            try { return go.GetComponent(typeName); }
             catch { return null; }
         }
 
@@ -1395,7 +2036,7 @@ namespace SledCoopMod
             }
         }
 
-        private static void SelectPauseMenuDefault()
+        private static void SelectActiveMenuDefault()
         {
             if (Time.frameCount - _lastPauseSelectFrame < 15)
                 return;
@@ -1405,27 +2046,40 @@ namespace SledCoopMod
             object? ui = GetUiReferenceController();
             if (ui == null) return;
 
-            GameObject? panel = GetMenuPanel(ui, "pauseMenu");
-            if (panel == null || !panel.activeInHierarchy)
-                return;
-
             var eventSystem = EventSystem.current;
             if (eventSystem == null)
                 return;
 
+            // Walk every modal menu in priority order. The first one that's
+            // active wins — that menu's firstSelectable becomes the
+            // EventSystem's current selection if no child of that panel is
+            // already selected. Without this, on the child instance the
+            // gamepad pointer never lands inside settings / inventory /
+            // confirm popups and the player can't navigate them.
             GameObject? selected = eventSystem.currentSelectedGameObject;
-            if (selected != null && selected.transform != null && selected.transform.IsChildOf(panel.transform))
-                return;
-
-            GameObject? first = GetMenuFirstSelectable(ui, "pauseMenu") ?? FindFirstSelectable(panel);
-            if (first == null)
-                return;
-
-            eventSystem.SetSelectedGameObject(first);
-            if (!_pauseSelectLogged)
+            foreach (string field in s_modalMenuFields)
             {
-                _pauseSelectLogged = true;
-                Plugin.Log.LogInfo("[NetworkedUiState] Selected native pause menu default control and released gameplay cursor.");
+                GameObject? panel = GetMenuPanel(ui, field);
+                if (panel == null || !panel.activeInHierarchy)
+                    continue;
+
+                if (selected != null
+                    && selected.activeInHierarchy
+                    && selected.transform != null
+                    && selected.transform.IsChildOf(panel.transform))
+                    return;
+
+                GameObject? first = GetMenuFirstSelectable(ui, field) ?? FindFirstSelectable(panel);
+                if (first == null)
+                    continue;
+
+                eventSystem.SetSelectedGameObject(first);
+                if (!_pauseSelectLogged)
+                {
+                    _pauseSelectLogged = true;
+                    Plugin.Log.LogInfo($"[NetworkedUiState] Selected native '{field}' default control for gamepad navigation.");
+                }
+                return;
             }
         }
 
@@ -1435,7 +2089,9 @@ namespace SledCoopMod
             {
                 foreach (var transform in EnumerateTransforms(root.transform))
                 {
-                    var selectable = transform?.gameObject.GetComponent(typeof(Selectable)) as Selectable;
+                    var selectable = transform?.gameObject != null
+                        ? SafeGetComponent<Selectable>(transform.gameObject)
+                        : null;
                     if (selectable != null && selectable.gameObject.activeInHierarchy && selectable.interactable)
                         return selectable.gameObject;
                 }
@@ -1542,9 +2198,18 @@ namespace SledCoopMod
 
             try
             {
+                // Fast per-frame sweep: nuke any TMP_Text/Text whose content
+                // matches LOADING / "TEXT CHAT ONLY LOBBIES" patterns even
+                // if its source isn't UILoadingTextAnimation (e.g. a
+                // pre-baked prefab text or a text re-stamped by a
+                // localisation event). Cheap; runs only during gameplay
+                // and the post-host-start cleanup window.
+                NetworkedUiState.RunFastLoadingTextSweep();
+
                 NetworkedUiState.ClearStuckLoadingIfNeeded();
                 NetworkedUiState.NormalizeHudIndicatorsIfNeeded();
                 NetworkedUiState.ApplyMenuCursorState();
+                NetworkedUiState.EnforceGameplayCursorLockIfNeeded();
             }
             catch (Exception e)
             {

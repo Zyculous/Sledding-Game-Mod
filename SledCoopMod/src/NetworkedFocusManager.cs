@@ -12,6 +12,19 @@ namespace SledCoopMod
         private bool _inputSystemConfigured;
         private bool _runInBackgroundLogged;
         private bool _cursorClipActive;
+
+        public static NetworkedFocusManager? Instance { get; private set; }
+
+        public static void ForceReleaseCursorForMenu()
+        {
+            try
+            {
+                Instance?.ReleaseCursorClip();
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+            }
+            catch { }
+        }
         private IntPtr _windowHandle;
         private int _nextRewiredAttemptFrame;
         private int _nextWindowRefreshFrame;
@@ -19,6 +32,7 @@ namespace SledCoopMod
 
         private void Awake()
         {
+            Instance = this;
             DontDestroyOnLoad(gameObject);
             ApplyRunInBackground();
             TryConfigureUnityInputSystemBackgroundInput();
@@ -71,7 +85,8 @@ namespace SledCoopMod
             && NetworkedInstanceManager.ShouldHideNetworkedOverlay
             && SceneWatcher.IsInGameplayScene
             && Time.timeScale > 0.01f
-            && !NetworkedUiState.IsNativeMenuOpen();
+            && !NetworkedUiState.IsNativeMenuOpen()
+            && !ModSettingsUi.IsAnyOpen;
 
         private void ApplyRunInBackground()
         {
@@ -188,7 +203,8 @@ namespace SledCoopMod
 
             bool nativeWantsLock = Cursor.lockState == CursorLockMode.Locked || !Cursor.visible;
             bool forceLock = Time.frameCount <= _forceMouseLockUntilFrame;
-            if (!nativeWantsLock && !forceLock)
+            bool userForce = ModConfig.ForceCursorLockInGameplay.Value;
+            if (!nativeWantsLock && !forceLock && !userForce)
             {
                 ReleaseCursorClip();
                 return;

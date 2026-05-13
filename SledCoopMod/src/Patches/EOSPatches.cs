@@ -1,10 +1,29 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
 namespace SledCoopMod.Patches
 {
+    // EOS suppression patches block functions that the game polls every
+    // frame in some boot states (e.g. LoadDelegatesWithEOSBindingAPI runs
+    // on every Update tick of the EOS loader). Logging at LogInfo per call
+    // floods Player.log when VerboseLogging is on. Dedupe per call-site
+    // so each block prints exactly once per process lifetime.
+    internal static class EosBlockLogger
+    {
+        private static readonly HashSet<string> _logged =
+            new HashSet<string>(StringComparer.Ordinal);
+
+        internal static void LogOnce(string site)
+        {
+            if (!ModConfig.VerboseLogging.Value) return;
+            if (!_logged.Add(site)) return;
+            Plugin.Log.LogInfo($"[EOS] Blocking {site}.");
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     // EOS / PlayEveryWare boot-time suppression patches
     //
@@ -270,8 +289,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.LoadEOSLibraries.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.LoadEOSLibraries");
             return false;
         }
     }
@@ -296,8 +314,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix(ref object __result)
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.LoadDynamicLibrary.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.LoadDynamicLibrary");
             __result = null;
             return false;
         }
@@ -323,8 +340,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.LoadDelegatesWithEOSBindingAPI.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.LoadDelegatesWithEOSBindingAPI");
             return false;
         }
     }
@@ -349,8 +365,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.Init.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.Init");
             return false;
         }
     }
@@ -375,8 +390,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.InitializePlatformInterface.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.InitializePlatformInterface");
             return false;
         }
     }
@@ -401,8 +415,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix(ref object __result)
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.CreatePlatformInterface.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.CreatePlatformInterface");
             __result = null;
             return false;
         }
@@ -428,8 +441,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.InitializeOverlay.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.InitializeOverlay");
             return false;
         }
     }
@@ -454,8 +466,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix(ref object __result)
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking EOSManager.EOSSingleton.GetEOSPlatformInterface.");
+            EosBlockLogger.LogOnce("EOSManager.EOSSingleton.GetEOSPlatformInterface");
             __result = null;
             return false;
         }
@@ -481,8 +492,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking PlatformSpecifics.InitializeOverlay.");
+            EosBlockLogger.LogOnce("PlatformSpecifics.InitializeOverlay");
             return false;
         }
     }
@@ -507,8 +517,7 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
-            if (ModConfig.VerboseLogging.Value)
-                Plugin.Log.LogInfo("[EOS] Blocking PlatformSpecifics.UpdateNetworkStatus.");
+            EosBlockLogger.LogOnce("PlatformSpecifics.UpdateNetworkStatus");
             return false;
         }
     }

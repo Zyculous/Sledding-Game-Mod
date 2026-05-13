@@ -8,9 +8,10 @@ namespace SledCoopMod
     {
         public static LocalCoopUI? Instance { get; private set; }
 
-        private const float PanelW = 360f;
+        private const float PanelW = 460f;
         private const float RowH = 28f;
         private const float BtnW = 78f;
+        private const float BindBtnW = 96f;
 
         private readonly string[] _guestUsernames = { "", "", "", "" };
         private readonly float[] _joinFlash = new float[4];
@@ -48,11 +49,24 @@ namespace SledCoopMod
                 if (_joinFlash[i] > 0f)
                     _joinFlash[i] -= Time.unscaledDeltaTime;
             }
+
+            // Drive the controller-bind capture state machine while the
+            // adding-players overlay is visible. The bind button lives in
+            // this overlay (not in ModSettingsUi) so capture must run from
+            // here too.
+            if (ControllerBindings.IsCapturing)
+                ControllerBindings.TickCapture();
         }
 
         private void OnGUI()
         {
             if (!ModConfig.Enabled.Value || !NetworkedInstanceManager.IsNetworkedModeConfigured)
+                return;
+
+            // The mod-settings overlay covers the screen; don't draw the
+            // local-coop overlay underneath or its buttons would intercept
+            // clicks meant for the settings modal.
+            if (ModSettingsUi.IsAnyOpen)
                 return;
 
             if (NetworkedInstanceManager.ShouldHideNetworkedOverlay)
@@ -72,7 +86,10 @@ namespace SledCoopMod
         private void DrawSetupOverlay()
         {
             int maxPlayers = Math.Max(1, Math.Min(4, ModConfig.MaxLocalPlayers.Value));
-            float panelH = 96f + maxPlayers * RowH + 56f;
+            // Each non-host slot now renders a bind row + a name/add row;
+            // the host slot is a single bind row.
+            float rowsHeight = RowH * (1 + (maxPlayers - 1) * 2);
+            float panelH = 96f + rowsHeight + 56f;
             var panel = new Rect(12f, 12f, PanelW, panelH);
             DrawBackground(panel, new Color(0f, 0f, 0f, 0.72f));
 
@@ -98,14 +115,49 @@ namespace SledCoopMod
                             ? $"  P{i + 1}  Ready"
                             : $"  P{i + 1}";
 
-                GUI.Label(new Rect(x, y, 92f, RowH - 2f), label, _labelStyle);
+                GUI.Label(new Rect(x, y, 80f, RowH - 2f), label, _labelStyle);
+
+                // Bind button + status string for *every* slot, including
+                // host (slot 0). Click → arm capture, press any button on the
+                // intended controller, mod stores the joystick id and
+                // NetworkedRewiredIsolationManager honors it at game start.
+                bool armed = ControllerBindings.CapturingSlot == i;
+                string bindStatus = armed
+                    ? "Press any button…"
+                    : ControllerBindings.DescribeBinding(i);
+                GUI.Label(new Rect(x + 84f, y + 2f, 180f, RowH - 6f), bindStatus, _labelStyle);
+
+                var bindRect = new Rect(x + 84f + 184f, y + 2f, BindBtnW, RowH - 6f);
+                if (armed)
+                {
+                    if (GUI.Button(bindRect, "Cancel", _buttonStyle))
+                        ControllerBindings.CancelCapture();
+                }
+                else if (GUI.Button(bindRect, "Bind", _buttonStyle))
+                {
+                    ControllerBindings.StartCapture(i);
+                }
+
+                // One-click KB+M shortcut next to Bind. Skips capture and
+                // writes the Keyboard+Mouse identifier directly. Useful
+                // when slot 0 wants KB+M without pressing a key first.
+                if (!armed)
+                {
+                    var kbRect = new Rect(bindRect.x + BindBtnW + 4f, bindRect.y, 56f, bindRect.height);
+                    if (GUI.Button(kbRect, "KB+M", _buttonStyle))
+                        ControllerBindings.SetBinding(i, ControllerBindings.KeyboardMouseId);
+                }
 
                 if (i > 0)
                 {
                     string current = joined && !string.IsNullOrWhiteSpace(slot?.ProfileName)
                         ? slot!.ProfileName
                         : _guestUsernames[i];
-                    var nameRect = new Rect(x + 96f, y + 2f, PanelW - 16f - 96f - BtnW - 8f, RowH - 6f);
+
+                    // Second row beneath: name field + add/remove. Keeps the
+                    // bind row uncluttered and the buttons visually aligned.
+                    y += RowH;
+                    var nameRect = new Rect(x + 84f, y + 2f, PanelW - 16f - 84f - BtnW - 8f, RowH - 6f);
                     string edited = GUI.TextField(nameRect, current ?? "", 32, _textStyle);
                     if (!string.Equals(edited, current, StringComparison.Ordinal))
                     {

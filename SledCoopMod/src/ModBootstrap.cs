@@ -46,6 +46,8 @@ namespace SledCoopMod
             AddManager<NetworkedRewiredIsolationManager>();
             AddManager<NetworkedUiStateManager>();
             AddManager<LocalCoopUI>();
+            AddManager<ModSettingsUi>();
+            AddManager<DebugInspector>();
 
             Plugin.Log.LogInfo(
                 $"SledCoopMod: all manager components attached. " +

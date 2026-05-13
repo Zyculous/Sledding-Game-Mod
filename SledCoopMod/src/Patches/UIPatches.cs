@@ -84,6 +84,12 @@ namespace SledCoopMod.Patches
         [HarmonyPrefix]
         static bool Prefix()
         {
+            // The mod-settings overlay (Ctrl+P modal) consumes keystrokes the
+            // native UiReferenceController would otherwise route to inventory /
+            // pause / etc. Skip the native handler entirely while it's open.
+            if (ModSettingsUi.IsAnyOpen)
+                return false;
+
             if (LocalCoopUI.Instance?.IsSettingsOpen == true)
                 return false;
 

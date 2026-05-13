@@ -86,6 +86,8 @@ namespace SledCoopMod
             ClassInjector.RegisterTypeInIl2Cpp<NetworkedRewiredIsolationManager>();
             ClassInjector.RegisterTypeInIl2Cpp<NetworkedUiStateManager>();
             ClassInjector.RegisterTypeInIl2Cpp<LocalCoopUI>();
+            ClassInjector.RegisterTypeInIl2Cpp<ModSettingsUi>();
+            ClassInjector.RegisterTypeInIl2Cpp<DebugInspector>();
 
             // Spawn a persistent GameObject that hosts our manager components.
             // This runs in the BepInEx/Unity player-loop context, so it survives scene loads.

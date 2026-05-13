@@ -452,6 +452,17 @@ namespace SledCoopMod.Patches
             else
                 SetAnyEmptyNameText(row, entry.Name);
 
+            // Brute-force fallback: any TMP_Text/Text in this row whose
+            // current content looks like the editor placeholder
+            // ("Playerwithareallylongname" or any single ≥18-char word with
+            // no spaces) gets overwritten. The strict / part / fuzzy
+            // searches above all key on the GameObject's *name*; if the
+            // prefab uses a child name we don't recognise, we'd miss it
+            // and the placeholder stays visible. This pass keys on the
+            // content instead, so the placeholder is wiped no matter what
+            // the GO is called.
+            OverwritePlaceholderText(row, entry.Name);
+
             SetChildActiveByName(row, "localplayerbackground", entry.IsLocal);
             SetChildActiveByName(row, "hostidentifier", entry.IsHost);
             SetChildActiveByName(row, "identifieralreadyinparty", false);
@@ -467,6 +478,82 @@ namespace SledCoopMod.Patches
             // exist in our loopback session and would crash — keep them visible
             // (so the row reads like a button) but non-interactable.
             DisableProfileButtons(row);
+        }
+
+        // Walk every TMP_Text/Text in the row's subtree and overwrite any
+        // whose visible text is empty OR matches the prefab placeholder
+        // pattern (a single ≥18-character word with no spaces, e.g.
+        // "Playerwithareallylongname"). We deliberately do NOT touch
+        // texts that look like real ping values ("0", "27ms", etc) or
+        // anything containing spaces (real names can have spaces, but
+        // placeholders virtually never do).
+        private static void OverwritePlaceholderText(GameObject row, string name)
+        {
+            try
+            {
+                foreach (var transform in EnumerateTransforms(row.transform))
+                {
+                    if (transform == null) continue;
+
+                    string goName = NormalizeName(transform.gameObject.name);
+                    bool isPing = goName.IndexOf("ping", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (isPing) continue;
+
+                    foreach (var component in GetKnownTextComponents(transform.gameObject))
+                    {
+                        if (component == null) continue;
+
+                        string current = ReadCurrentText(component) ?? "";
+                        if (LooksLikePlaceholder(current))
+                        {
+                            SetText(component, name);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static bool LooksLikePlaceholder(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return true;
+            string trimmed = text.Trim();
+            if (trimmed.Length == 0) return true;
+            if (trimmed.IndexOf(' ') >= 0) return false;        // real names can have spaces
+            if (trimmed.Length >= 18) return true;              // "Playerwithareallylongname" etc
+            // Common one-word placeholders the engine ships with:
+            return string.Equals(trimmed, "PlayerName", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(trimmed, "Username", StringComparison.OrdinalIgnoreCase)
+                || trimmed.IndexOf("PlayerName", StringComparison.OrdinalIgnoreCase) >= 0
+                || trimmed.IndexOf("Playerwith", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string? ReadCurrentText(object? component)
+        {
+            if (component == null) return null;
+            try
+            {
+                var prop = component.GetType().GetProperty(
+                    "text",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy);
+                if (prop != null && prop.CanRead)
+                    return prop.GetValue(component) as string;
+            }
+            catch { }
+
+            foreach (string fieldName in new[] { "m_text", "_text" })
+            {
+                try
+                {
+                    var field = component.GetType().GetField(
+                        fieldName,
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy);
+                    if (field != null && field.FieldType == typeof(string))
+                        return field.GetValue(component) as string;
+                }
+                catch { }
+            }
+            return null;
         }
 
         private static void ActivateAncestorsUpTo(GameObject row)
@@ -495,7 +582,9 @@ namespace SledCoopMod.Patches
             {
                 foreach (var transform in EnumerateTransforms(row.transform))
                 {
-                    var selectable = transform?.gameObject.GetComponent(typeof(Selectable)) as Selectable;
+                    var selectable = transform?.gameObject != null
+                        ? SafeGetComponent<Selectable>(transform.gameObject)
+                        : null;
                     if (selectable == null)
                         continue;
 
@@ -702,17 +791,72 @@ namespace SledCoopMod.Patches
             if (textObject == null)
                 return;
 
+            // IL2CPP-Interop wrappers for TMP_Text expose `text` as a property
+            // *on the base class* (TMP_Text). Without FlattenHierarchy the
+            // property lookup fails on the derived TextMeshProUGUI wrapper
+            // and our SetValue silently no-ops, leaving the prefab placeholder
+            // ("Playerwithareallylongname") visible. Walk the hierarchy first;
+            // fall back to the m_text serialized field if the property path
+            // doesn't bind.
+            bool wrote = false;
             try
             {
-                var prop = textObject.GetType().GetProperty(
+                var t = textObject.GetType();
+                var prop = t.GetProperty(
                     "text",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                prop?.SetValue(textObject, text);
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy);
+                if (prop != null && prop.CanWrite)
+                {
+                    prop.SetValue(textObject, text);
+                    wrote = true;
+                }
             }
             catch { }
 
+            if (!wrote)
+            {
+                foreach (string fieldName in new[] { "m_text", "_text" })
+                {
+                    try
+                    {
+                        var field = textObject.GetType().GetField(
+                            fieldName,
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy);
+                        if (field != null && field.FieldType == typeof(string))
+                        {
+                            field.SetValue(textObject, text);
+                            wrote = true;
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+            }
+
             try { GetGameObjectFromValue(textObject)?.SetActive(true); }
             catch { }
+
+            // Force a re-render on TMP_Text so a directly-written backing
+            // field actually paints.
+            if (wrote)
+            {
+                try
+                {
+                    var setLayoutDirty = textObject.GetType().GetMethod(
+                        "SetLayoutDirty",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                    setLayoutDirty?.Invoke(textObject, null);
+                }
+                catch { }
+                try
+                {
+                    var setVerticesDirty = textObject.GetType().GetMethod(
+                        "SetVerticesDirty",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                    setVerticesDirty?.Invoke(textObject, null);
+                }
+                catch { }
+            }
         }
 
         private static bool SetTextOnGameObject(GameObject? go, string text)
@@ -745,12 +889,35 @@ namespace SledCoopMod.Patches
             return result;
         }
 
+        // IL2CPP-interop GameObject only exposes GetComponent(Il2CppSystem.Type)
+        // and GetComponent(string). Calling GetComponent with a managed
+        // System.Type throws MissingMethodException at the binder before any
+        // try/catch can run. Route every game-type lookup through the string
+        // overload (game types resolved by short name) and every Unity type
+        // through the generic overload (which the interop does provide).
         private static object? GetComponentByType(GameObject? go, Type? type)
         {
             if (go == null || type == null)
                 return null;
 
-            try { return go.GetComponent(type); }
+            if (type == typeof(Text))            return SafeGetComponent<Text>(go);
+            if (type == typeof(Selectable))      return SafeGetComponent<Selectable>(go);
+            if (type == typeof(Graphic))         return SafeGetComponent<Graphic>(go);
+
+            return SafeGetComponentByTypeName(go, type.Name);
+        }
+
+        private static T? SafeGetComponent<T>(GameObject go) where T : Component
+        {
+            try { return go.GetComponent<T>(); }
+            catch { return null; }
+        }
+
+        private static object? SafeGetComponentByTypeName(GameObject go, string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName))
+                return null;
+            try { return go.GetComponent(typeName); }
             catch { return null; }
         }
 

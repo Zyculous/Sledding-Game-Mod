@@ -37,6 +37,9 @@ namespace SledCoopMod.Patches
             }
         }
 
+        private static readonly System.Collections.Generic.HashSet<string> _menuSuppressLogged =
+            new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+
         [HarmonyPrefix]
         static bool Prefix(MethodBase __originalMethod)
         {
@@ -44,7 +47,15 @@ namespace SledCoopMod.Patches
                 return true;
 
             if (NetworkedUiState.IsNativeMenuOpen())
+            {
+                // One-time-per-method log so repeated suppression doesn't spam,
+                // but the *first* drop is always visible — otherwise an
+                // incorrectly broad menu list silently breaks pickup/throw and
+                // we have no breadcrumb in the log to point at.
+                if (_menuSuppressLogged.Add(__originalMethod.Name))
+                    Plugin.Log.LogInfo($"[NetworkedInputIsolation] Menu open; suppressing '{__originalMethod.Name}' (first occurrence; further drops silent).");
                 return false;
+            }
 
             if (!InputBlockHelper.ShouldSuppressHostHandAction())
                 return true;
